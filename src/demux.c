@@ -322,6 +322,11 @@ void demux_run(DemuxContext *ctx)
             AudioPkt *audioPkt = malloc(sizeof(AudioPkt));
             audioPkt->queued = av_packet_alloc();
 
+            if (!audioPkt) {
+                fprintf(stderr, "demux: failed to alloc audio packet\n");
+                break;
+            }
+
             if (!audioPkt->queued) { av_packet_unref(pkt); continue; }
 
             audioPkt->is_loop_start = 0;
