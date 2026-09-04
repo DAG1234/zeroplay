@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <libavutil/version.h>
 #include <libavcodec/avcodec.h>
+#include <libavutil/time.h>
 /* AV_PROFILE_* replaced FF_PROFILE_* in FFmpeg 7.0 (libavcodec 61).
  * Map the new names onto the old ones for Bookworm and earlier. */
 #if LIBAVCODEC_VERSION_MAJOR < 61
@@ -307,10 +308,15 @@ void demux_run(DemuxContext *ctx)
             }
 
             break;
-        } else if (ret < 0) {
-            fprintf(stderr, "demux: error reading frame: %i\n", ret);
-            break;
-        }
+          } else if (ret == AVERROR(EAGAIN)) {
+              av_usleep(1000);
+              continue;
+          } else if (ret < 0) {
+              char errbuf[AV_ERROR_MAX_STRING_SIZE];
+              av_strerror(ret, errbuf, sizeof(errbuf));
+              fprintf(stderr, "demux: error reading frame: %i (%s)\n", ret, errbuf);
+              break;
+          }
 
         if (pkt->stream_index == ctx->video_stream_idx) {
             if (pkt->pts != AV_NOPTS_VALUE) pkt->pts += loop_pts_base_video;
