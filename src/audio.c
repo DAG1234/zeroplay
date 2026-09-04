@@ -665,6 +665,7 @@ void audio_run(AudioContext *ctx)
             av_freep(&out_buf);
             av_frame_unref(frame);
         }
+        free(audioPkt);
     }
 
     if (total_errors)
