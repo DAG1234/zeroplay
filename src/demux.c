@@ -288,7 +288,12 @@ void demux_run(DemuxContext *ctx)
             if(ctx->loop_seamless) {
                 audio_loop_pending = 1;
 
-                av_seek_frame(ctx->fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+                int ret = av_seek_frame(ctx->fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+
+                if (ret < 0) {
+                    fprintf(stderr, "demux: seek to 0 for seamless loop failed\n");
+                    break;
+                }
 
                 loop_pts_base_video += ctx->video_rebase;
 
