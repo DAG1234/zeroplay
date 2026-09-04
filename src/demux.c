@@ -333,7 +333,7 @@ void demux_run(DemuxContext *ctx)
                 continue;
             }
 
-            if(pkt->pts >= ctx->audio_rebase - pkt->duration)
+            if(ctx->loop_seamless && pkt->pts >= ctx->audio_rebase - pkt->duration)
                 audioPkt->is_loop_end = 1;
 
             if(audio_loop_pending) {
@@ -360,7 +360,7 @@ void demux_run(DemuxContext *ctx)
             }
 
             //if cue starts before sub_rebase but would exceed it with its duration, cut it
-            if (pkt->duration > 0 && pkt->pts + pkt->duration > ctx->sub_rebase)
+            if (ctx->loop_seamless && pkt->duration > 0 && pkt->pts + pkt->duration > ctx->sub_rebase)
                 pkt->duration = ctx->sub_rebase - pkt->pts;
 
             if (pkt->pts != AV_NOPTS_VALUE) pkt->pts += loop_pts_base_subs;
