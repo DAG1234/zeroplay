@@ -250,8 +250,9 @@ int demux_init_seamless(DemuxContext *ctx)
             }
         }
 
-        ctx->audio_rebase = (int64_t)(video_loop_sec * atb.den / atb.num);   //truncate result
-        ctx->audio_rebase = (ctx->audio_rebase / audio_frame_ticks) * audio_frame_ticks;  //ensure that audio_rebase actually is a multiple of it's tick (usually 1024)
+        ctx->audio_rebase = duration_audio;
+        ctx->audio_rebase_truncated = (int64_t)(video_loop_sec * atb.den / atb.num);
+        ctx->audio_rebase_truncated = (ctx->audio_rebase_truncated / audio_frame_ticks) * audio_frame_ticks;
     }
 
     if(ctx->subtitle_stream_idx != -1){
@@ -270,6 +271,9 @@ void demux_run(DemuxContext *ctx)
     int64_t loop_pts_base_subs = 0;
     int audio_loop_pending = 0;
 
+    int video_done = 0;
+    int audio_done = (ctx->audio_stream_idx == -1); // no audio stream = done
+
     AVPacket *pkt = av_packet_alloc();
 
     if (!pkt) {
@@ -286,7 +290,9 @@ void demux_run(DemuxContext *ctx)
 
         if (ret == AVERROR_EOF) {
 
-            if(ctx->loop_seamless) {
+            if(ctx->loop_seamless && video_done && audio_done) {
+                video_done = 0;
+                audio_done = (ctx->audio_stream_idx == -1);
                 audio_loop_pending = 1;
 
                 int ret = av_seek_frame(ctx->fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
@@ -319,6 +325,9 @@ void demux_run(DemuxContext *ctx)
           }
 
         if (pkt->stream_index == ctx->video_stream_idx) {
+            if (pkt->pts + pkt->duration >= ctx->video_rebase)
+                video_done = 1;
+
             if (pkt->pts != AV_NOPTS_VALUE) pkt->pts += loop_pts_base_video;
             if (pkt->dts != AV_NOPTS_VALUE) pkt->dts += loop_pts_base_video;
 
@@ -344,8 +353,9 @@ void demux_run(DemuxContext *ctx)
             audioPkt->is_loop_end = 0;
 
             //seamless loop: skip audio-packets if they exceed video-duration
-            if (ctx->loop_seamless && pkt->pts >= ctx->audio_rebase) {
+            if (ctx->loop_seamless && pkt->pts >= ctx->audio_rebase_truncated) {
                 av_packet_unref(pkt);
+                audio_done = 1;
                 continue;
             }
 
