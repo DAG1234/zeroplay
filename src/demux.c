@@ -377,7 +377,7 @@ void demux_run(DemuxContext *ctx)
                 break;
             }
         } else if (pkt->stream_index == ctx->subtitle_stream_idx &&
-                   ctx->subtitle_queue) {
+            ctx->subtitle_queue) {
 
             //seamless loop: skip subtitle-packets if they exceed video-duration
             if (ctx->loop_seamless && pkt->pts >= ctx->sub_rebase) {
@@ -394,7 +394,7 @@ void demux_run(DemuxContext *ctx)
 
             AVPacket *queued = av_packet_alloc();
             if (!queued) { av_packet_unref(pkt); continue; }
-                av_packet_move_ref(queued, pkt);
+            av_packet_move_ref(queued, pkt);
             if (!queue_push(ctx->subtitle_queue, queued)) {
                 av_packet_free(&queued);
                 break;
