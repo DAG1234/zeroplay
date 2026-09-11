@@ -24,6 +24,8 @@ ZeroPlay runs on any Linux device with a V4L2 M2M hardware decoder and DRM/KMS d
 
 Both 32-bit and 64-bit builds are supported. The install script builds from source automatically for the correct architecture.
 
+Small SPI/DBI TFT panels (no HDMI) are also supported — see [SPI/DBI Panels](#spidbi-panels) below.
+
 ---
 
 ## Supported Formats
@@ -123,6 +125,7 @@ Each path can be a video file, image, `.txt`/`.m3u` playlist, directory, URL, or
 | `--hls-bitrate bps` | Cap HLS variant bitrate in bps (or `HLS_MAX_BANDWIDTH` env) |
 | `--yt-quality n` | YouTube stream height: 360, 480, 720, 1080 (default: 480) |
 | `--image-duration n` | Seconds per image (default: 10, 0 = hold forever) |
+| `--spi-fill` | SPI/DBI panel: crop video to fill instead of the default letterboxed fit — see [SPI/DBI Panels](#spidbi-panels) |
 | `--verbose` | Print decoder and driver info |
 | `--help` | Show usage |
 
@@ -259,6 +262,45 @@ zeroplay --audio-device plughw:CARD=Headphones,DEV=0 movie.mp4
 
 # List available devices
 aplay -L
+```
+
+---
+
+## SPI/DBI Panels
+
+ZeroPlay can drive small SPI TFT panels (ILI9341, ST7789V via `panel-mipi-dbi`, and
+other `drm/tiny` MIPI DBI controllers) with no HDMI attached — the decoder hands the
+ISP an RGB565 frame instead of NV12, and it's presented on the panel's own plane.
+
+**Requirements:**
+
+- The panel must bind through **DRM/KMS**, not `fbtft`. fbtft gives you `/dev/fb1`
+  and no DRM node at all, which ZeroPlay can't use. Check with `ls /dev/dri/` — you
+  need a `cardN` entry. If you only get a framebuffer, switch the panel's overlay
+  from an `fbtft`-style one to a `drm/tiny` one (a dedicated overlay for your
+  controller, or the generic `dtoverlay=mipi-dbi-spi` for ST7789 and other panels
+  without a dedicated driver).
+- A reasonably fast SPI clock. A full-panel refresh at low frame rates needs real
+  bandwidth — 40 MHz worked cleanly on the panels this was tested on; push it as
+  high as your panel and wiring tolerate without flickering.
+
+**Two display modes**, picked with `--spi-fill` (default is fit):
+
+| Mode | Behaviour | Requirements |
+|---|---|---|
+| Fit (default) | Whole picture, letterboxed to the panel's aspect. CPU-scales the decoded frame into a panel-sized buffer. | None — works on any kernel. |
+| `--spi-fill` | Crops to fill the panel edge-to-edge, no CPU scaling (zero-copy: the decoder's own buffer is scanned out directly, cropped by the plane's source rectangle). | Needs the panel's `drm/tiny` driver to accept a framebuffer larger than the panel and honour a non-zero plane source offset — merged in mainline and in `raspberrypi/linux` `rpi-7.2.y`+. On an older kernel this mode will fail to allocate the framebuffer; fit mode still works everywhere. |
+
+If the panel can't keep the requested frame rate (a slow SPI clock, a large panel, or
+a high-frame-rate source), ZeroPlay drops late frames rather than falling into slow
+motion — you'll see fewer frames displayed, at the correct real-time speed.
+
+```bash
+# Default: whole picture, letterboxed
+zeroplay movie.mp4
+
+# Crop to fill the panel (needs a current kernel, see table above)
+zeroplay --spi-fill movie.mp4
 ```
 
 ---
