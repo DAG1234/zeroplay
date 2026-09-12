@@ -14,6 +14,7 @@ typedef struct {
     /* the demuxer passes frame-infos to the audio decoder - for seamless looping */
     int             is_loop_start;
     int             is_loop_end;
+    int             last_frame_duration;
 } AudioPkt;
 
 typedef struct {

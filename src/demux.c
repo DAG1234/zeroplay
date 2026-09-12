@@ -250,9 +250,8 @@ int demux_init_seamless(DemuxContext *ctx)
             }
         }
 
-        ctx->audio_rebase = duration_audio;
-        ctx->audio_rebase_truncated = (int64_t)(video_loop_sec * atb.den / atb.num);
-        ctx->audio_rebase_truncated = (ctx->audio_rebase_truncated / audio_frame_ticks) * audio_frame_ticks;
+        ctx->audio_rebase = (int64_t)(video_loop_sec * atb.den / atb.num);
+        ctx->audio_rebase_truncated = (ctx->audio_rebase / audio_frame_ticks) * audio_frame_ticks;
     }
 
     if(ctx->subtitle_stream_idx != -1){
@@ -353,14 +352,17 @@ void demux_run(DemuxContext *ctx)
             audioPkt->is_loop_end = 0;
 
             //seamless loop: skip audio-packets if they exceed video-duration
-            if (ctx->loop_seamless && pkt->pts >= ctx->audio_rebase_truncated) {
+            if (ctx->loop_seamless && pkt->pts >= ctx->audio_rebase_truncated + pkt->duration) {
                 av_packet_unref(pkt);
-                audio_done = 1;
                 continue;
             }
 
-            if(ctx->loop_seamless && pkt->pts >= ctx->audio_rebase - pkt->duration)
+            if(ctx->loop_seamless && pkt->pts >= ctx->audio_rebase_truncated){
                 audioPkt->is_loop_end = 1;
+                audio_done = 1;
+                //if the audio-stream is trimmed to the exact video-duration then the last frame is most probably not a complete audio-frame
+                audioPkt->last_frame_duration = (pkt->pts + pkt->duration) - ctx->audio_rebase;
+            }
 
             if(audio_loop_pending) {
                audioPkt->is_loop_start = 1;

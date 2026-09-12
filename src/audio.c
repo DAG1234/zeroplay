@@ -607,10 +607,24 @@ void audio_run(AudioContext *ctx)
                     pending_start_frame = 0;
                     apply_fade(s16_data, fade_samples, ctx->channels, /*fade_in=*/1);
                 }
+
                 if (audioPkt->is_loop_end) {
-                    int offset_frames = converted - fade_samples;
-                    apply_fade(s16_data + offset_frames * ctx->channels,
-                               fade_samples, ctx->channels, /*fade_in=*/0);
+                    //for seamless looping: if audio is trimmed to video-duration, the last audio-frame is
+                    //most certainly not a full sample long - so cut it where it really should end
+                    int64_t excess_input = audioPkt->last_frame_duration;
+                    if (excess_input < 0) excess_input = 0;
+
+                    double ratio = (double)ctx->alsa_rate / frame->sample_rate;
+                    int excess_output = (int)(excess_input * ratio + 0.5);
+                    if (excess_output > converted) excess_output = converted;
+
+                    converted -= excess_output;   // hard trim to the exact loop boundary
+
+                    int fs = fade_samples;
+                    if (fs > converted) fs = converted;
+                    int offset_frames = converted - fs;
+                    if (offset_frames >= 0)
+                        apply_fade(s16_data + offset_frames * ctx->channels, fs, ctx->channels, /*fade_in=*/0);
                 }
 
                 snd_pcm_sframes_t written =
