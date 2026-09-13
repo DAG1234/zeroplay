@@ -436,13 +436,23 @@ void audio_abort(AudioContext *ctx, int drop_pcm)
         snd_pcm_drop(ctx->pcm);
 }
 
-void apply_fade(int16_t *samples, int nsamples, int nchannels, int fade_in /*1=in,0=out*/) {
+/* Free a queued audio packet and its wrapper. */
+void audio_pkt_free(AudioPkt *audioPkt)
+{
+    if (!audioPkt) return;
+    if (audioPkt->queued)
+        av_packet_free(&audioPkt->queued);
+    free(audioPkt);
+}
+
+static void apply_fade(int16_t *samples, int nsamples, int nchannels, int fade_in /*1=in,0=out*/) {
     for (int i = 0; i < nsamples; i++) {
         float g = fade_in ? (float)i / nsamples : 1.0f - (float)i / nsamples;
         for (int c = 0; c < nchannels; c++)
             samples[i*nchannels + c] = (int16_t)(samples[i*nchannels + c] * g);
     }
 }
+
 /* ------------------------------------------------------------------ */
 
 void audio_run(AudioContext *ctx)
@@ -508,10 +518,12 @@ void audio_run(AudioContext *ctx)
         }
 
         if (avcodec_send_packet(ctx->codec_ctx, pkt) < 0) {
-            av_packet_free(&pkt);
+            audio_pkt_free(audioPkt);
             continue;
         }
-        av_packet_free(&pkt);
+        /* The wrapper outlives its packet: is_loop_end is read per decoded
+         * frame below, after the packet itself has been handed to the codec. */
+        av_packet_free(&audioPkt->queued);
 
         while (avcodec_receive_frame(ctx->codec_ctx, frame) == 0) {
             total_frames++;
@@ -704,6 +716,8 @@ void audio_run(AudioContext *ctx)
             av_freep(&out_buf);
             av_frame_unref(frame);
         }
+
+        audio_pkt_free(audioPkt);   /* packet already released above */
     }
 
     if (total_errors)

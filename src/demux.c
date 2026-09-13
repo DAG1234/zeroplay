@@ -286,9 +286,15 @@ void demux_run(DemuxContext *ctx)
         if (ret == AVERROR_EOF) {
 
             if(ctx->loop_seamless) {
-                audio_loop_pending = 1;
+                //an unchecked failure here returns EOF again immediately and
+                //spins the loop at 100% CPU
+                if (av_seek_frame(ctx->fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD) < 0) {
+                    fprintf(stderr, "demux: seamless loop — seek to start failed, "
+                                    "ending playback\n");
+                    break;
+                }
 
-                av_seek_frame(ctx->fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+                audio_loop_pending = 1;
 
                 loop_pts_base_video += ctx->video_rebase;
 
@@ -319,21 +325,25 @@ void demux_run(DemuxContext *ctx)
                 break;
             }
         } else if (pkt->stream_index == ctx->audio_stream_idx) {
-            AudioPkt *audioPkt = malloc(sizeof(AudioPkt));
-            audioPkt->queued = av_packet_alloc();
-
-            if (!audioPkt->queued) { av_packet_unref(pkt); continue; }
-
-            audioPkt->is_loop_start = 0;
-            audioPkt->is_loop_end = 0;
-
             //seamless loop: skip audio-packets if they exceed video-duration
+            //(checked before allocating, so a skipped packet costs nothing)
             if (ctx->loop_seamless && pkt->pts >= ctx->audio_rebase) {
                 av_packet_unref(pkt);
                 continue;
             }
 
-            if(pkt->pts >= ctx->audio_rebase - pkt->duration)
+            AudioPkt *audioPkt = malloc(sizeof(AudioPkt));
+            if (!audioPkt) { av_packet_unref(pkt); continue; }
+
+            audioPkt->queued = av_packet_alloc();
+            if (!audioPkt->queued) { free(audioPkt); av_packet_unref(pkt); continue; }
+
+            audioPkt->is_loop_start = 0;
+            audioPkt->is_loop_end = 0;
+
+            //seamless loop only: audio_rebase is 0 in normal playback, which
+            //would mark every packet as the last one and fade all audio out
+            if(ctx->loop_seamless && pkt->pts >= ctx->audio_rebase - pkt->duration)
                 audioPkt->is_loop_end = 1;
 
             if(audio_loop_pending) {
@@ -347,7 +357,7 @@ void demux_run(DemuxContext *ctx)
             av_packet_move_ref(audioPkt->queued, pkt);
 
             if (!queue_push(ctx->audio_queue, audioPkt)) {
-                av_packet_free(&audioPkt->queued);
+                audio_pkt_free(audioPkt);
                 break;
             }
         } else if (pkt->stream_index == ctx->subtitle_stream_idx &&
@@ -360,7 +370,10 @@ void demux_run(DemuxContext *ctx)
             }
 
             //if cue starts before sub_rebase but would exceed it with its duration, cut it
-            if (pkt->duration > 0 && pkt->pts + pkt->duration > ctx->sub_rebase)
+            //(seamless only: sub_rebase is 0 in normal playback, which would give
+            //every cue a negative duration)
+            if (ctx->loop_seamless && pkt->duration > 0 &&
+                pkt->pts + pkt->duration > ctx->sub_rebase)
                 pkt->duration = ctx->sub_rebase - pkt->pts;
 
             if (pkt->pts != AV_NOPTS_VALUE) pkt->pts += loop_pts_base_subs;
@@ -368,7 +381,7 @@ void demux_run(DemuxContext *ctx)
 
             AVPacket *queued = av_packet_alloc();
             if (!queued) { av_packet_unref(pkt); continue; }
-                av_packet_move_ref(queued, pkt);
+            av_packet_move_ref(queued, pkt);
             if (!queue_push(ctx->subtitle_queue, queued)) {
                 av_packet_free(&queued);
                 break;

@@ -64,6 +64,7 @@ long long audio_get_clock_us(AudioContext *ctx);
 void      audio_pause(AudioContext *ctx);
 void      audio_resume(AudioContext *ctx);
 void      audio_abort(AudioContext *ctx, int drop_pcm);  /* stop now, discard */
+void      audio_pkt_free(AudioPkt *audioPkt);   /* frees the packet and wrapper */
 float     audio_volume_up(AudioContext *ctx);
 float     audio_volume_down(AudioContext *ctx);
 int       audio_toggle_mute(AudioContext *ctx);  /* returns 1 if now muted */

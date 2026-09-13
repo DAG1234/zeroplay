@@ -487,6 +487,19 @@ static int queue_drain_packets(Queue *q)
     return n;
 }
 
+/* Same, for the audio queue: it carries AudioPkt wrappers, not bare packets. */
+static int queue_drain_audio(Queue *q)
+{
+    void *item;
+    int   n = 0;
+
+    while (queue_trypop(q, &item) == 1) {
+        audio_pkt_free((AudioPkt *)item);
+        n++;
+    }
+    return n;
+}
+
 /* Same, for decoded frames. These are requeued rather than just freed: the
  * V4L2 CAPTURE buffer behind each one has to go back to the decoder, which
  * outlives this call on the seek path. */
@@ -508,7 +521,7 @@ static void player_threads_stop(PlayerContext *p)
 
     /* Throw the backlog away so the consumers hit "closed and empty" on their
      * next pop instead of playing it out. */
-    int audio_backlog = queue_drain_packets(&p->audio_queue);
+    int audio_backlog = queue_drain_audio(&p->audio_queue);
     queue_drain_packets(&p->video_queue);
     if (p->sub_active && p->sub_embedded)
         queue_drain_packets(&p->sub_queue);
@@ -1180,6 +1193,11 @@ static int run_control_mode(Options *opt)
                 player_close_pipeline(&player);
                 paused        = 0;
                 audio_started = 0;
+                /* Seamless looping is per clip here, not per session: the
+                 * demuxer never reports EOF in seamless mode, so applying it
+                 * to a one-shot "load" would swallow the "ended" event and
+                 * leave the controller waiting forever. */
+                player.loop_seamless = loop && opt->loop_seamless;
                 parse_separated_video_audio_url(arg, current_path, current_audio);
                 if (player_open_video(&player, current_path, current_audio, opt) < 0) {
                     fprintf(stderr, "zeroplay: failed to open '%s'\n", current_path);
