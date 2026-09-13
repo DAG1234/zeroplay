@@ -409,6 +409,33 @@ void audio_resume(AudioContext *ctx)
     pthread_mutex_unlock(&ctx->pause_mutex);
 }
 
+/*
+ * Tear-down counterpart to audio_pause(): make audio_run() return as soon as
+ * it can instead of playing the queue out in real time.
+ *
+ * Closing the audio queue is not enough on its own — queue_pop() hands back
+ * every buffered packet before it reports closed, so the thread would keep
+ * decoding and blocking in snd_pcm_writei() for as long as the backlog lasts
+ * (a full 256-packet queue is ~5s of AAC). The caller discards the backlog;
+ * this releases the thread from the two places it can be blocked.
+ *
+ * drop_pcm kills the ~0.2s of samples already handed to the card so an
+ * in-flight snd_pcm_writei() returns immediately. Pass 0 at a natural
+ * end-of-clip, where that tail is the real end of the audio and cutting it
+ * would clip the last fraction of a second.
+ */
+void audio_abort(AudioContext *ctx, int drop_pcm)
+{
+    pthread_mutex_lock(&ctx->pause_mutex);
+    ctx->aborting = 1;
+    ctx->paused   = 0;
+    pthread_cond_signal(&ctx->pause_cond);
+    pthread_mutex_unlock(&ctx->pause_mutex);
+
+    if (drop_pcm && ctx->pcm)
+        snd_pcm_drop(ctx->pcm);
+}
+
 /* ------------------------------------------------------------------ */
 
 void audio_run(AudioContext *ctx)
@@ -426,14 +453,18 @@ void audio_run(AudioContext *ctx)
     int64_t prev_pts       = AV_NOPTS_VALUE;
     int     prev_nb_samples = 0;
 
+    ctx->aborting = 0;   /* fresh run — a previous abort is history */
+
     vlog("audio: playback thread started\n");
 
     while (1) {
         /* Block while paused */
         pthread_mutex_lock(&ctx->pause_mutex);
-        while (ctx->paused)
+        while (ctx->paused && !ctx->aborting)
             pthread_cond_wait(&ctx->pause_cond, &ctx->pause_mutex);
         pthread_mutex_unlock(&ctx->pause_mutex);
+
+        if (ctx->aborting) break;
 
         void *item = NULL;
         
@@ -554,9 +585,17 @@ void audio_run(AudioContext *ctx)
 
             /* Check pause again between frames */
             pthread_mutex_lock(&ctx->pause_mutex);
-            while (ctx->paused)
+            while (ctx->paused && !ctx->aborting)
                 pthread_cond_wait(&ctx->pause_cond, &ctx->pause_mutex);
             pthread_mutex_unlock(&ctx->pause_mutex);
+
+            /* Bail before the write: after a drop, snd_pcm_writei() fails and
+             * the recovery path below would re-prepare the card and play a
+             * fragment of a clip we are in the middle of abandoning. */
+            if (ctx->aborting) {
+                av_frame_unref(frame);
+                break;
+            }
 
             /* Convert to S16 interleaved */
             int out_samples = swr_get_out_samples(ctx->swr_ctx,

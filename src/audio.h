@@ -38,6 +38,10 @@ typedef struct {
     pthread_mutex_t  pause_mutex;
     pthread_cond_t   pause_cond;
 
+    /* Set by audio_abort() to make audio_run() return without playing out
+     * whatever is still queued. Cleared when audio_run() starts. */
+    volatile int     aborting;
+
     /* Sync with video if separate */
     volatile int64_t *video_pts;
     int64_t           audio_pts;
@@ -51,6 +55,7 @@ void      audio_run(AudioContext *ctx);
 long long audio_get_clock_us(AudioContext *ctx);
 void      audio_pause(AudioContext *ctx);
 void      audio_resume(AudioContext *ctx);
+void      audio_abort(AudioContext *ctx, int drop_pcm);  /* stop now, discard */
 float     audio_volume_up(AudioContext *ctx);
 float     audio_volume_down(AudioContext *ctx);
 int       audio_toggle_mute(AudioContext *ctx);  /* returns 1 if now muted */

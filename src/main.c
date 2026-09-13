@@ -451,6 +451,45 @@ static void player_threads_start(PlayerContext *p)
     }
 }
 
+/*
+ * Discard everything still sitting in a packet queue, and report how many
+ * items went in the bin.
+ *
+ * queue_close() alone does not stop a consumer: queue_pop() hands back every
+ * buffered item before it reports closed, by design, so the tail of a clip
+ * still plays out at a natural end of stream. On a switch or a seek that is
+ * exactly wrong — the queues hold seconds of already-demuxed media and the
+ * consumers grind all of it through the hardware in real time before their
+ * join returns.
+ *
+ * Safe to call with the threads still running: queue_trypop() takes the queue
+ * mutex, so we just race the consumer for items and free whatever we win.
+ * Also plugs a leak — queue_destroy() never freed what was left behind.
+ */
+static int queue_drain_packets(Queue *q)
+{
+    void *item;
+    int   n = 0;
+
+    while (queue_trypop(q, &item) == 1) {
+        AVPacket *pkt = (AVPacket *)item;
+        av_packet_free(&pkt);
+        n++;
+    }
+    return n;
+}
+
+/* Same, for decoded frames. These are requeued rather than just freed: the
+ * V4L2 CAPTURE buffer behind each one has to go back to the decoder, which
+ * outlives this call on the seek path. */
+static void queue_drain_frames(PlayerContext *p)
+{
+    void *item;
+
+    while (queue_trypop(&p->frame_queue, &item) == 1)
+        vdec_requeue_frame(&p->vdec, (DecodedFrame *)item);
+}
+
 static void player_threads_stop(PlayerContext *p)
 {
     queue_close(&p->video_queue);
@@ -458,17 +497,31 @@ static void player_threads_stop(PlayerContext *p)
     queue_close(&p->frame_queue);
     if (p->sub_active && p->sub_embedded)
         queue_close(&p->sub_queue);
+
+    /* Throw the backlog away so the consumers hit "closed and empty" on their
+     * next pop instead of playing it out. */
+    int audio_backlog = queue_drain_packets(&p->audio_queue);
+    queue_drain_packets(&p->video_queue);
+    if (p->sub_active && p->sub_embedded)
+        queue_drain_packets(&p->sub_queue);
+    queue_drain_frames(p);
+
+    /* Release the audio thread from a pause wait or a blocking write. Only
+     * drop the card when there was a backlog: with nothing left to discard
+     * this is a natural end of clip and those last samples are the real tail
+     * of the audio. */
+    if (p->audio_active)
+        audio_abort(&p->audio, audio_backlog > 0);
+
     pthread_join(p->dtid, NULL);
     if (p->audio_active && p->separate_audio)
         pthread_join(p->datid, NULL);
     pthread_join(p->vtid, NULL);
-    if (p->audio_active) {
-        audio_resume(&p->audio);
+    if (p->audio_active)
         pthread_join(p->atid, NULL);
-    }
     if (p->sub_active && p->sub_embedded)
         pthread_join(p->stid, NULL);
-    }
+}
 
 static void player_queues_reinit(PlayerContext *p)
 {
