@@ -197,15 +197,35 @@ int demux_open(DemuxContext *ctx, const char *filename,
 }
 
 /* ------------------------------------------------------------------ */
+
+/*
+ * A stream's own duration is not always populated. demux_open() caps
+ * probesize and max_analyze_duration to keep startup fast on a Pi, and under
+ * a truncated analysis avformat_find_stream_info() can leave
+ * AVStream::duration at zero or AV_NOPTS_VALUE. The container duration (mvhd
+ * for MP4) is read straight from the header and survives that, so fall back
+ * to it. Returns <= 0 when neither is usable.
+ */
+static double stream_duration_sec(AVFormatContext *fmt, int idx)
+{
+    const AVStream *st = fmt->streams[idx];
+
+    if (st->duration > 0 && st->duration != AV_NOPTS_VALUE)
+        return (double)st->duration * st->time_base.num / st->time_base.den;
+
+    if (fmt->duration > 0 && fmt->duration != AV_NOPTS_VALUE)
+        return (double)fmt->duration / AV_TIME_BASE;
+
+    return -1;
+}
+
 int demux_init_seamless(DemuxContext *ctx)
 {
-    int64_t duration_video = ctx->fmt_ctx->streams[ctx->video_stream_idx]->duration;
-    int64_t duration_audio = 0;
     double video_loop_sec = -1;
     double audio_loop_sec = -1;
     int audio_frame_ticks = -1;
 
-    ctx->video_rebase = duration_video;
+    ctx->video_rebase = -1;
     ctx->audio_rebase = -1;
     ctx->sub_rebase = -1;
 
@@ -213,8 +233,17 @@ int demux_init_seamless(DemuxContext *ctx)
     AVRational stb;
     AVRational vtb = ctx->fmt_ctx->streams[ctx->video_stream_idx]->time_base;
 
+    video_loop_sec = stream_duration_sec(ctx->fmt_ctx, ctx->video_stream_idx);
+    if (video_loop_sec <= 0) {
+        fprintf(stderr,
+            "demux: no usable video duration — cannot loop seamlessly.\n");
+        return -1;
+    }
+
+    /* Per-loop PTS advance, back in the video stream's own time_base. */
+    ctx->video_rebase = (int64_t)(video_loop_sec * vtb.den / vtb.num);
+
     if(ctx->audio_stream_idx != -1){
-        duration_audio = ctx->fmt_ctx->streams[ctx->audio_stream_idx]->duration;
         atb = ctx->fmt_ctx->streams[ctx->audio_stream_idx]->time_base;
 
         AVCodecParameters *acp = ctx->fmt_ctx->streams[ctx->audio_stream_idx]->codecpar;
@@ -225,8 +254,13 @@ int demux_init_seamless(DemuxContext *ctx)
         if (audio_frame_ticks <= 0)
             audio_frame_ticks = acp->frame_size;
 
-        audio_loop_sec = (double)duration_audio * atb.num / atb.den;
-        video_loop_sec = (double)duration_video * vtb.num / vtb.den;
+        /* Codecs with no fixed frame size (PCM) report 0 for both. Quantising
+         * by 0 is a division by zero: SIGFPE on x86, and on ARM it silently
+         * yields 0, which would drop every audio packet. Don't quantise. */
+        if (audio_frame_ticks <= 0)
+            audio_frame_ticks = 1;
+
+        audio_loop_sec = stream_duration_sec(ctx->fmt_ctx, ctx->audio_stream_idx);
 
         double diff = fabs(video_loop_sec - audio_loop_sec);
 
@@ -257,6 +291,13 @@ int demux_init_seamless(DemuxContext *ctx)
         stb = ctx->fmt_ctx->streams[ctx->subtitle_stream_idx]->time_base;
         ctx->sub_rebase = (int64_t)(video_loop_sec * stb.den / stb.num);
     }
+
+    /* Every packet is dropped or faded against these, so a silently wrong
+     * value costs the whole stream. Log them. */
+    vlog("demux: seamless — video %.3fs (rebase %lld), audio %.3fs "
+         "(rebase %lld, %d ticks/frame)\n",
+         video_loop_sec, (long long)ctx->video_rebase,
+         audio_loop_sec, (long long)ctx->audio_rebase, audio_frame_ticks);
 
     return 0;
 }
