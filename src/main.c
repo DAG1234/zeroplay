@@ -1511,7 +1511,14 @@ int main(int argc, char *argv[])
             /* Drain and display any remaining decoded frames before exiting */
             for (int i = 0; i < opened; i++) {
                 PlayerContext *p = &players[i];
-                if (p->image_mode) continue;
+                /* A player that hit eos via a failed player_advance_to_next()
+                 * (skip key, or no next playlist item) already ran
+                 * player_close_pipeline() — its frame_queue was destroyed and
+                 * any frames still in it reference dmabuf fds vdec_close()
+                 * already closed. Only a player that hit eos via its queue
+                 * reporting closed+empty (natural end of decode, pipeline
+                 * still open) has real frames left to drain here. */
+                if (p->image_mode || !p->pipeline_open) continue;
                 while (1) {
                     if (p->held_frame) {
                         int64_t due = p->wall_start + p->held_frame->pts_us;
