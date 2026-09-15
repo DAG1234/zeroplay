@@ -24,8 +24,6 @@ ZeroPlay runs on any Linux device with a V4L2 M2M hardware decoder and DRM/KMS d
 
 Both 32-bit and 64-bit builds are supported. The install script builds from source automatically for the correct architecture.
 
-Small SPI/DBI TFT panels (no HDMI) are also supported — see [SPI/DBI Panels](#spidbi-panels) below.
-
 ---
 
 ## Supported Formats
@@ -115,6 +113,7 @@ Each path can be a video file, image, `.txt`/`.m3u` playlist, directory, URL, or
 | Flag | Description |
 |---|---|
 | `--loop` | Loop playback indefinitely |
+| `--loop-seamless` | Loop playback indefinitely, seamlessly |
 | `--shuffle` | Randomise playlist order |
 | `--recursive` | Load files from folder recursively |
 | `--no-audio` | Disable audio |
@@ -302,6 +301,20 @@ zeroplay movie.mp4
 # Crop to fill the panel (needs a current kernel, see table above)
 zeroplay --spi-fill movie.mp4
 ```
+
+---
+
+## Seamless loop
+
+To play a video file seamlessly and indefinitely, start zeroplay with the --loop-seamless flag.
+
+Restriction:
+- Does not support external audio or subtitle files.
+
+MP4 Requirements:
+- If the audio stream is longer than the video stream, it will be trimmed to match the video duration.
+- If the video stream is longer than the audio stream, zeroplay will fail.
+- For best results, ensure the MP4 file has matching audio and video durations.
 
 ---
 

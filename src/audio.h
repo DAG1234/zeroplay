@@ -9,6 +9,15 @@
 #include "queue.h"
 
 typedef struct {
+    AVPacket        *queued;
+
+    /* the demuxer passes frame-infos to the audio decoder - for seamless looping */
+    int             is_loop_start;
+    int             is_loop_end;
+    int             last_frame_duration;
+} AudioPkt;
+
+typedef struct {
     /* ALSA */
     snd_pcm_t       *pcm;
     char             device[64];

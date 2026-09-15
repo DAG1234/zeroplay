@@ -409,6 +409,13 @@ void audio_resume(AudioContext *ctx)
     pthread_mutex_unlock(&ctx->pause_mutex);
 }
 
+void apply_fade(int16_t *samples, int nsamples, int nchannels, int fade_in /*1=in,0=out*/) {
+    for (int i = 0; i < nsamples; i++) {
+        float g = fade_in ? (float)i / nsamples : 1.0f - (float)i / nsamples;
+        for (int c = 0; c < nchannels; c++)
+            samples[i*nchannels + c] = (int16_t)(samples[i*nchannels + c] * g);
+    }
+}
 /* ------------------------------------------------------------------ */
 
 void audio_run(AudioContext *ctx)
@@ -425,6 +432,7 @@ void audio_run(AudioContext *ctx)
     int rate_checked       = 0;
     int64_t prev_pts       = AV_NOPTS_VALUE;
     int     prev_nb_samples = 0;
+    int pending_start_frame     = 0;
 
     vlog("audio: playback thread started\n");
 
@@ -442,7 +450,11 @@ void audio_run(AudioContext *ctx)
             break;       /* queue closed — EOS */
 
         /* Decode the packet.  Note: pkt is local — no leak. */
-        AVPacket *pkt = (AVPacket *)item;
+        AudioPkt *audioPkt = (AudioPkt *)item;
+        AVPacket *pkt = (AVPacket *)audioPkt->queued;
+
+        if(audioPkt->is_loop_start && pending_start_frame != 1)
+            pending_start_frame = 1;
 
         /* Block while ahead of video */
         if (ctx->video_pts) {
@@ -466,6 +478,7 @@ void audio_run(AudioContext *ctx)
 
         if (avcodec_send_packet(ctx->codec_ctx, pkt) < 0) {
             av_packet_free(&pkt);
+            free(audioPkt);
             continue;
         }
         av_packet_free(&pkt);
@@ -586,6 +599,35 @@ void audio_run(AudioContext *ctx)
                     }
                 }
 
+                //seamless looping: fade out audio on the last frame and in on the first frame again
+                //- smoothes the audio-crack at the end of the video
+                int fade_samples = (int)(ctx->alsa_rate * 0.03);
+                if (fade_samples > converted) fade_samples = converted;
+
+                if (pending_start_frame) {
+                    pending_start_frame = 0;
+                    apply_fade(s16_data, fade_samples, ctx->channels, /*fade_in=*/1);
+                }
+
+                if (audioPkt->is_loop_end) {
+                    //for seamless looping: if audio is trimmed to video-duration, the last audio-frame is
+                    //most certainly not a full sample long - so cut it where it really should end
+                    int64_t excess_input = audioPkt->last_frame_duration;
+                    if (excess_input < 0) excess_input = 0;
+
+                    double ratio = (double)ctx->alsa_rate / frame->sample_rate;
+                    int excess_output = (int)(excess_input * ratio + 0.5);
+                    if (excess_output > converted) excess_output = converted;
+
+                    converted -= excess_output;   // hard trim to the exact loop boundary
+
+                    int fs = fade_samples;
+                    if (fs > converted) fs = converted;
+                    int offset_frames = converted - fs;
+                    if (offset_frames >= 0)
+                        apply_fade(s16_data + offset_frames * ctx->channels, fs, ctx->channels, /*fade_in=*/0);
+                }
+
                 snd_pcm_sframes_t written =
                     snd_pcm_writei(ctx->pcm, out_buf,
                                    (snd_pcm_uframes_t)converted);
@@ -638,6 +680,7 @@ void audio_run(AudioContext *ctx)
             av_freep(&out_buf);
             av_frame_unref(frame);
         }
+        free(audioPkt);
     }
 
     if (total_errors)
