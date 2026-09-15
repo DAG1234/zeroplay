@@ -289,7 +289,13 @@ void demux_run(DemuxContext *ctx)
 
         if (ret == AVERROR_EOF) {
 
-            if(ctx->loop_seamless && video_done && audio_done) {
+            if(ctx->loop_seamless) {
+
+                if(!(video_done && audio_done)){
+                    fprintf(stderr, "demux: EOF was hit before audio and video-duration were hit\n");
+                    break;
+                }
+
                 video_done = 0;
                 audio_done = (ctx->audio_stream_idx == -1);
                 audio_loop_pending = 1;
