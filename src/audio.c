@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 #include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
 #include <libavutil/version.h>
@@ -741,17 +742,43 @@ long long audio_get_clock_us(AudioContext *ctx)
 
 /* ------------------------------------------------------------------ */
 
+/*
+ * Volume steps in dB, not flat percentage. Hearing perceives loudness on a
+ * roughly logarithmic scale, so a fixed +/-10 percentage-point step (the old
+ * behaviour) is nearly inaudible near 100% but leaves nothing between "10%,
+ * still loud" and "0%, silent" at the bottom -- exactly backwards from where
+ * fine control actually matters. Stepping by a fixed dB amount instead makes
+ * every press the same *perceived* loudness change across the whole range.
+ */
+#define VOLUME_STEP_DB     3.0f    /* one step ~= one notch on a TV remote */
+#define VOLUME_MAX_LINEAR  2.0f    /* +6 dB ceiling, unchanged from before */
+#define VOLUME_FLOOR_DB  -40.0f    /* quieter than this, just call it mute */
+
+static float volume_to_db(float linear)
+{
+    /* linear <= 0 has no finite dB value -- treat it as "already at the
+     * floor" so the very next audio_volume_up() step starts climbing back
+     * up from VOLUME_FLOOR_DB instead of computing log10f(0). */
+    if (linear <= 0.0f) return VOLUME_FLOOR_DB;
+    return 20.0f * log10f(linear);
+}
+
 float audio_volume_up(AudioContext *ctx)
 {
-    ctx->volume += 0.1f;
-    if (ctx->volume > 2.0f) ctx->volume = 2.0f;
+    float db = volume_to_db(ctx->volume) + VOLUME_STEP_DB;
+    ctx->volume = powf(10.0f, db / 20.0f);
+    if (ctx->volume > VOLUME_MAX_LINEAR) ctx->volume = VOLUME_MAX_LINEAR;
     return ctx->volume;
 }
 
 float audio_volume_down(AudioContext *ctx)
 {
-    ctx->volume -= 0.1f;
-    if (ctx->volume < 0.0f) ctx->volume = 0.0f;
+    float db = volume_to_db(ctx->volume) - VOLUME_STEP_DB;
+    if (db <= VOLUME_FLOOR_DB) {
+        ctx->volume = 0.0f;
+        return ctx->volume;
+    }
+    ctx->volume = powf(10.0f, db / 20.0f);
     return ctx->volume;
 }
 
