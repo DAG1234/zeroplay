@@ -219,6 +219,13 @@ int demux_init_seamless(DemuxContext *ctx)
     AVRational stb;
     AVRational vtb = ctx->fmt_ctx->streams[ctx->video_stream_idx]->time_base;
 
+    /* Needed below for both the audio rebase and the subtitle rebase — compute
+     * it unconditionally so a file with subtitles but no audio track doesn't
+     * fall through with this left at its -1 sentinel (which previously made
+     * sub_rebase come out negative, so every subtitle packet looked like it
+     * "exceeded video duration" from the very first one and never showed). */
+    video_loop_sec = (double)duration_video * vtb.num / vtb.den;
+
     if(ctx->audio_stream_idx != -1){
         duration_audio = ctx->fmt_ctx->streams[ctx->audio_stream_idx]->duration;
 
@@ -238,7 +245,6 @@ int demux_init_seamless(DemuxContext *ctx)
             audio_frame_ticks = acp->frame_size;
 
         audio_loop_sec = (double)duration_audio * atb.num / atb.den;
-        video_loop_sec = (double)duration_video * vtb.num / vtb.den;
 
         double diff = fabs(video_loop_sec - audio_loop_sec);
 
@@ -364,7 +370,11 @@ void demux_run(DemuxContext *ctx)
 
             audioPkt->queued = av_packet_alloc();
 
-            if (!audioPkt->queued) { av_packet_unref(pkt); continue; }
+            if (!audioPkt->queued) {
+                av_packet_unref(pkt);
+                free(audioPkt);
+                continue;
+            }
 
             audioPkt->is_loop_start = 0;
             audioPkt->is_loop_end = 0;
@@ -372,6 +382,8 @@ void demux_run(DemuxContext *ctx)
             //seamless loop: skip audio-packets if they exceed video-duration
             if (ctx->loop_seamless && pkt->pts >= ctx->audio_rebase_truncated + pkt->duration) {
                 av_packet_unref(pkt);
+                av_packet_free(&audioPkt->queued);
+                free(audioPkt);
                 continue;
             }
 
@@ -394,6 +406,7 @@ void demux_run(DemuxContext *ctx)
 
             if (!queue_push(ctx->audio_queue, audioPkt)) {
                 av_packet_free(&audioPkt->queued);
+                free(audioPkt);
                 break;
             }
         } else if (pkt->stream_index == ctx->subtitle_stream_idx &&
