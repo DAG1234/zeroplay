@@ -113,7 +113,7 @@ Each path can be a video file, image, `.txt`/`.m3u` playlist, directory, URL, or
 | Flag | Description |
 |---|---|
 | `--loop` | Loop playback indefinitely |
-| `--loop-seamless` | Loop playback indefinitely, seamlessly |
+| `--loop-seamless` | Loop a single track indefinitely without a pipeline restart between loops |
 | `--shuffle` | Randomise playlist order |
 | `--recursive` | Load files from folder recursively |
 | `--no-audio` | Disable audio |
@@ -306,7 +306,7 @@ zeroplay --spi-fill movie.mp4
 
 ## Seamless loop
 
-To play a video file seamlessly and indefinitely, start zeroplay with the --loop-seamless flag.
+To play a video file seamlessly and indefinitely, start zeroplay with the `--loop-seamless` flag. Instead of tearing the pipeline down and rebuilding it at the end of every pass, the demuxer seeks back to the start and keeps feeding packets, so there is no gap between loops.
 
 Restriction:
 - Does not support external audio or subtitle files.
@@ -315,6 +315,8 @@ MP4 Requirements:
 - If the audio stream is longer than the video stream, it will be trimmed to match the video duration.
 - If the video stream is longer than the audio stream, zeroplay will fail.
 - For best results, ensure the MP4 file has matching audio and video durations.
+
+In `--control` mode the flag applies per clip: `loadloop` loops seamlessly, while `load` plays once and still emits `ended`.
 
 ---
 

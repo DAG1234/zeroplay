@@ -404,7 +404,43 @@ void audio_resume(AudioContext *ctx)
     pthread_mutex_unlock(&ctx->pause_mutex);
 }
 
-void apply_fade(int16_t *samples, int nsamples, int nchannels, int fade_in /*1=in,0=out*/) {
+/*
+ * Tear-down counterpart to audio_pause(): make audio_run() return as soon as
+ * it can instead of playing the queue out in real time.
+ *
+ * Closing the audio queue is not enough on its own — queue_pop() hands back
+ * every buffered packet before it reports closed, so the thread would keep
+ * decoding and blocking in snd_pcm_writei() for as long as the backlog lasts
+ * (a full 256-packet queue is ~5s of AAC). The caller discards the backlog;
+ * this releases the thread from the two places it can be blocked.
+ *
+ * drop_pcm kills the ~0.2s of samples already handed to the card so an
+ * in-flight snd_pcm_writei() returns immediately. Pass 0 at a natural
+ * end-of-clip, where that tail is the real end of the audio and cutting it
+ * would clip the last fraction of a second.
+ */
+void audio_abort(AudioContext *ctx, int drop_pcm)
+{
+    pthread_mutex_lock(&ctx->pause_mutex);
+    ctx->aborting = 1;
+    ctx->paused   = 0;
+    pthread_cond_signal(&ctx->pause_cond);
+    pthread_mutex_unlock(&ctx->pause_mutex);
+
+    if (drop_pcm && ctx->pcm)
+        snd_pcm_drop(ctx->pcm);
+}
+
+/* Free a queued audio packet and its wrapper. */
+void audio_pkt_free(AudioPkt *audioPkt)
+{
+    if (!audioPkt) return;
+    if (audioPkt->queued)
+        av_packet_free(&audioPkt->queued);
+    free(audioPkt);
+}
+
+static void apply_fade(int16_t *samples, int nsamples, int nchannels, int fade_in /*1=in,0=out*/) {
     for (int i = 0; i < nsamples; i++) {
         float g = fade_in ? (float)i / nsamples : 1.0f - (float)i / nsamples;
         for (int c = 0; c < nchannels; c++)
@@ -422,6 +458,9 @@ void apply_fade(int16_t *samples, int nsamples, int nchannels, int fade_in /*1=i
  * every single pause — so keep the clock running instead: while paused,
  * feed the card silence instead of blocking outright. Resume then just lets
  * real samples flow again, with no clock transition at all.
+ *
+ * Also bails out on ctx->aborting, same as the paused case: a pending abort
+ * should release this wait immediately rather than keep feeding silence.
  */
 static void write_silence_chunk(AudioContext *ctx)
 {
@@ -444,7 +483,7 @@ static void write_silence_chunk(AudioContext *ctx)
 static void wait_while_paused(AudioContext *ctx)
 {
     pthread_mutex_lock(&ctx->pause_mutex);
-    while (ctx->paused) {
+    while (ctx->paused && !ctx->aborting) {
         pthread_mutex_unlock(&ctx->pause_mutex);
         write_silence_chunk(ctx);   /* blocks ~50ms — doubles as the wait */
         pthread_mutex_lock(&ctx->pause_mutex);
@@ -469,11 +508,15 @@ void audio_run(AudioContext *ctx)
     int     prev_nb_samples = 0;
     int pending_start_frame     = 0;
 
+    ctx->aborting = 0;   /* fresh run — a previous abort is history */
+
     vlog("audio: playback thread started\n");
 
     while (1) {
         /* Block while paused (feeding silence to keep the I2S clock alive) */
         wait_while_paused(ctx);
+
+        if (ctx->aborting) break;
 
         void *item = NULL;
         
@@ -509,11 +552,12 @@ void audio_run(AudioContext *ctx)
         }
 
         if (avcodec_send_packet(ctx->codec_ctx, pkt) < 0) {
-            av_packet_free(&pkt);
-            free(audioPkt);
+            audio_pkt_free(audioPkt);
             continue;
         }
-        av_packet_free(&pkt);
+        /* The wrapper outlives its packet: is_loop_end is read per decoded
+         * frame below, after the packet itself has been handed to the codec. */
+        av_packet_free(&audioPkt->queued);
 
         while (avcodec_receive_frame(ctx->codec_ctx, frame) == 0) {
             total_frames++;
@@ -600,6 +644,14 @@ void audio_run(AudioContext *ctx)
             /* Check pause again between frames */
             wait_while_paused(ctx);
 
+            /* Bail before the write: after a drop, snd_pcm_writei() fails and
+             * the recovery path below would re-prepare the card and play a
+             * fragment of a clip we are in the middle of abandoning. */
+            if (ctx->aborting) {
+                av_frame_unref(frame);
+                break;
+            }
+
             /* Convert to S16 interleaved */
             int out_samples = swr_get_out_samples(ctx->swr_ctx,
                                                   frame->nb_samples);
@@ -637,7 +689,6 @@ void audio_run(AudioContext *ctx)
                     pending_start_frame = 0;
                     apply_fade(s16_data, fade_samples, ctx->channels, /*fade_in=*/1);
                 }
-
                 if (audioPkt->is_loop_end) {
                     //for seamless looping: if audio is trimmed to video-duration, the last audio-frame is
                     //most certainly not a full sample long - so cut it where it really should end
@@ -709,7 +760,8 @@ void audio_run(AudioContext *ctx)
             av_freep(&out_buf);
             av_frame_unref(frame);
         }
-        free(audioPkt);
+
+        audio_pkt_free(audioPkt);   /* packet already released above */
     }
 
     if (total_errors)
