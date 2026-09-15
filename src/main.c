@@ -849,7 +849,7 @@ static int run_ws_mode(Options *opt)
     memset(&player, 0, sizeof(player));
     player.output_idx = 0;
     player.no_audio   = opt->no_audio;
-    p.loop_seamless   = opt->loop_seamless;
+    player.loop_seamless   = opt->loop_seamless;
 
     int paused = 0;
     int audio_started = 0;
