@@ -388,21 +388,15 @@ int audio_open(AudioContext *ctx, AVStream *stream,
 
 void audio_pause(AudioContext *ctx)
 {
+    /* Note: samples already sitting in the ALSA buffer are left to play
+     * out — see wait_while_paused() for why we don't drop them. */
     pthread_mutex_lock(&ctx->pause_mutex);
     ctx->paused = 1;
     pthread_mutex_unlock(&ctx->pause_mutex);
-
-    /* Drop buffered samples immediately so sound stops now */
-    if (ctx->pcm)
-        snd_pcm_drop(ctx->pcm);
 }
 
 void audio_resume(AudioContext *ctx)
 {
-    /* Prepare ALSA to accept new samples after drop */
-    if (ctx->pcm)
-        snd_pcm_prepare(ctx->pcm);
-
     pthread_mutex_lock(&ctx->pause_mutex);
     ctx->paused = 0;
     pthread_cond_signal(&ctx->pause_cond);
@@ -415,6 +409,46 @@ void apply_fade(int16_t *samples, int nsamples, int nchannels, int fade_in /*1=i
         for (int c = 0; c < nchannels; c++)
             samples[i*nchannels + c] = (int16_t)(samples[i*nchannels + c] * g);
     }
+}
+
+/*
+ * Amps like the MAX98357A that are wired without a controllable SD_MODE
+ * (ours is tied always-on via the `no-sdmode` overlay param) have no way to
+ * mute themselves. Any time the I2S bit/frame clock stops and restarts cold,
+ * the DAC's clock-recovery has to relock, and that transient comes out as an
+ * audible pop/static burst. audio_pause()/audio_resume() used to call
+ * snd_pcm_drop()/snd_pcm_prepare(), which stops and restarts that clock on
+ * every single pause — so keep the clock running instead: while paused,
+ * feed the card silence instead of blocking outright. Resume then just lets
+ * real samples flow again, with no clock transition at all.
+ */
+static void write_silence_chunk(AudioContext *ctx)
+{
+    if (!ctx->pcm)
+        return;
+
+    /* ~50ms of silence: short enough that resume feels immediate */
+    snd_pcm_uframes_t frames = (snd_pcm_uframes_t)(ctx->alsa_rate / 20);
+    if (frames == 0)
+        frames = 1;
+
+    int16_t silence[frames * (unsigned)ctx->channels];
+    memset(silence, 0, sizeof(silence));
+
+    snd_pcm_sframes_t written = snd_pcm_writei(ctx->pcm, silence, frames);
+    if (written < 0)
+        snd_pcm_recover(ctx->pcm, (int)written, 1);
+}
+
+static void wait_while_paused(AudioContext *ctx)
+{
+    pthread_mutex_lock(&ctx->pause_mutex);
+    while (ctx->paused) {
+        pthread_mutex_unlock(&ctx->pause_mutex);
+        write_silence_chunk(ctx);   /* blocks ~50ms — doubles as the wait */
+        pthread_mutex_lock(&ctx->pause_mutex);
+    }
+    pthread_mutex_unlock(&ctx->pause_mutex);
 }
 /* ------------------------------------------------------------------ */
 
@@ -437,11 +471,8 @@ void audio_run(AudioContext *ctx)
     vlog("audio: playback thread started\n");
 
     while (1) {
-        /* Block while paused */
-        pthread_mutex_lock(&ctx->pause_mutex);
-        while (ctx->paused)
-            pthread_cond_wait(&ctx->pause_cond, &ctx->pause_mutex);
-        pthread_mutex_unlock(&ctx->pause_mutex);
+        /* Block while paused (feeding silence to keep the I2S clock alive) */
+        wait_while_paused(ctx);
 
         void *item = NULL;
         
@@ -566,10 +597,7 @@ void audio_run(AudioContext *ctx)
                      total_frames, total_errors, ctx->frames_written);
 
             /* Check pause again between frames */
-            pthread_mutex_lock(&ctx->pause_mutex);
-            while (ctx->paused)
-                pthread_cond_wait(&ctx->pause_cond, &ctx->pause_mutex);
-            pthread_mutex_unlock(&ctx->pause_mutex);
+            wait_while_paused(ctx);
 
             /* Convert to S16 interleaved */
             int out_samples = swr_get_out_samples(ctx->swr_ctx,
