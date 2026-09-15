@@ -206,6 +206,11 @@ int demux_init_seamless(DemuxContext *ctx)
     double audio_loop_sec = -1;
     int audio_frame_ticks = -1;
 
+    if (duration_video == AV_NOPTS_VALUE)
+        fprintf(stderr, "demux: video-duration is unknown - this is crucial for seamless looping\n");
+    else if (duration_video < 0)
+        fprintf(stderr, "demux: video-duration is invalid - this is crucial for seamless looping\n");
+
     ctx->video_rebase = duration_video;
     ctx->audio_rebase = -1;
     ctx->sub_rebase = -1;
@@ -216,6 +221,12 @@ int demux_init_seamless(DemuxContext *ctx)
 
     if(ctx->audio_stream_idx != -1){
         duration_audio = ctx->fmt_ctx->streams[ctx->audio_stream_idx]->duration;
+
+        if (duration_audio == AV_NOPTS_VALUE)
+            fprintf(stderr, "demux: audio-duration is unknown - this is crucial for seamless looping\n");
+        else if (duration_audio < 0)
+            fprintf(stderr, "demux: audio-duration is invalid - this is crucial for seamless looping\n");
+
         atb = ctx->fmt_ctx->streams[ctx->audio_stream_idx]->time_base;
 
         AVCodecParameters *acp = ctx->fmt_ctx->streams[ctx->audio_stream_idx]->codecpar;
