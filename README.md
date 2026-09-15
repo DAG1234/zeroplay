@@ -289,7 +289,7 @@ ISP an RGB565 frame instead of NV12, and it's presented on the panel's own plane
 | Mode | Behaviour | Requirements |
 |---|---|---|
 | Fit (default) | Whole picture, letterboxed to the panel's aspect. CPU-scales the decoded frame into a panel-sized buffer. | None — works on any kernel. |
-| `--spi-fill` | Crops to fill the panel edge-to-edge, no CPU scaling (zero-copy: the decoder's own buffer is scanned out directly, cropped by the plane's source rectangle). | Needs the panel's `drm/tiny` driver to accept a framebuffer larger than the panel and honour a non-zero plane source offset — merged in mainline and in `raspberrypi/linux` `rpi-7.2.y`+. On an older kernel this mode will fail to allocate the framebuffer; fit mode still works everywhere. |
+| `--spi-fill` | Crops to fill the panel edge-to-edge, no CPU scaling (zero-copy: the decoder's own buffer is scanned out directly, cropped by the plane's source rectangle). | Needs the panel's `drm/tiny` driver to accept a framebuffer larger than the panel and honour a non-zero plane source offset — merged in `raspberrypi/linux` `rpi-7.2.y`+ and submitted upstream dri-devel, waiting on merge status as of 9/15/26. On an older kernel this mode will fail to allocate the framebuffer; fit mode still works everywhere. |
 
 If the panel can't keep the requested frame rate (a slow SPI clock, a large panel, or
 a high-frame-rate source), ZeroPlay drops late frames rather than falling into slow
