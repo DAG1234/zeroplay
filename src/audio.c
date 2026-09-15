@@ -478,6 +478,7 @@ void audio_run(AudioContext *ctx)
 
         if (avcodec_send_packet(ctx->codec_ctx, pkt) < 0) {
             av_packet_free(&pkt);
+            free(audioPkt);
             continue;
         }
         av_packet_free(&pkt);
