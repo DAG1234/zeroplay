@@ -339,12 +339,13 @@ void demux_run(DemuxContext *ctx)
             }
         } else if (pkt->stream_index == ctx->audio_stream_idx) {
             AudioPkt *audioPkt = malloc(sizeof(AudioPkt));
-            audioPkt->queued = av_packet_alloc();
 
             if (!audioPkt) {
                 fprintf(stderr, "demux: failed to alloc audio packet\n");
                 break;
             }
+
+            audioPkt->queued = av_packet_alloc();
 
             if (!audioPkt->queued) { av_packet_unref(pkt); continue; }
 
