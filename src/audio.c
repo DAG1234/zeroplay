@@ -52,17 +52,21 @@ static int get_frame_channels(AVFrame *frame)
 #endif
 }
 
-static void set_swr_layout(SwrContext *swr, AVCodecContext *codec_ctx)
+// should have fixed downmixing in this function, but unsure if this affects
+// other code or if it is the best place for fix.
+static void set_swr_layout(SwrContext *swr, AVCodecContext *codec_ctx, uint64_t out_channels)
 {
 #if HAVE_CH_LAYOUT
     av_opt_set_chlayout(swr, "in_chlayout",  &codec_ctx->ch_layout, 0);
-    av_opt_set_chlayout(swr, "out_chlayout", &codec_ctx->ch_layout, 0);
+    av_opt_set_chlayout(swr, "out_chlayout", &codec_ctx->ch_layout, 0);  // not changed
 #else
-    int64_t layout = codec_ctx->channel_layout
+    uint64_t in_layout = codec_ctx->channel_layout
                    ? codec_ctx->channel_layout
                    : av_get_default_channel_layout(codec_ctx->channels);
-    av_opt_set_int(swr, "in_channel_layout",  layout, 0);
-    av_opt_set_int(swr, "out_channel_layout", layout, 0);
+    uint64_t out_layout = av_get_default_channel_layout(out_channels);
+    av_opt_set_int(swr, "in_channel_layout",  in_layout, 0);
+    fprintf(stderr, "DEBUG: set_swr_layout(): out_layout set to %ld\n", out_layout);  // 6CH
+    av_opt_set_int(swr, "out_channel_layout", out_layout, 0);
 #endif
 }
 
@@ -129,6 +133,7 @@ static int probe_native_rate(const char *dev_name,
 static int alsa_setup_device(AudioContext *ctx, const char *dev_name,
                              snd_pcm_format_t fmt)
 {
+    fprintf(stderr, "DEBUG: audio: alsa_setup_device() started.\n");
     int err;
 
     err = snd_pcm_open(&ctx->pcm, dev_name, SND_PCM_STREAM_PLAYBACK, 0);
@@ -152,6 +157,20 @@ static int alsa_setup_device(AudioContext *ctx, const char *dev_name,
         ctx->pcm = NULL;
         return -1;
     }
+
+    unsigned int actual_ch = 2;
+    // query ALSA hardware channels
+    err = snd_pcm_hw_params_set_channels_near(ctx->pcm, hw_params, &actual_ch);
+    if (err < 0) {
+        fprintf(stderr, "audio: failed to set channels on '%s': %s\n", dev_name, snd_strerror(err));
+        snd_pcm_close(ctx->pcm);
+        ctx->pcm = NULL;
+        return -1;
+    }
+
+    ctx->channels = (int)actual_ch;
+    
+    // OLD: I think the 6CH bug is here, why ctx-> channels?
     snd_pcm_hw_params_set_channels(ctx->pcm, hw_params,
                                    (unsigned int)ctx->channels);
 
@@ -186,7 +205,7 @@ static int alsa_setup_device(AudioContext *ctx, const char *dev_name,
     snd_pcm_hw_params_get_period_size(hw_params, &actual_period, NULL);
 
     snd_pcm_format_t actual_fmt;
-    unsigned int actual_ch = 0, actual_rate = 0;
+    unsigned int actual_rate = 0;
     snd_pcm_hw_params_get_format(hw_params, &actual_fmt);
     snd_pcm_hw_params_get_channels(hw_params, &actual_ch);
     snd_pcm_hw_params_get_rate(hw_params, &actual_rate, NULL);
@@ -197,6 +216,7 @@ static int alsa_setup_device(AudioContext *ctx, const char *dev_name,
             snd_pcm_format_name(actual_fmt),
             (unsigned long)actual_buffer, (unsigned long)actual_period);
 
+    fprintf(stderr, "DEBUG: audio: alsa_setup_device() finished.\n");
     return 0;
 }
 
@@ -240,7 +260,8 @@ int audio_open(AudioContext *ctx, AVStream *stream,
 
     ctx->audio_queue    = audio_queue;
     ctx->sample_rate    = stream->codecpar->sample_rate;
-    ctx->channels       = get_channels(stream->codecpar);
+    // is this right? shouldn't it be device channels?
+    ctx->channels       = 2;
     ctx->time_base      = stream->time_base;
     ctx->frames_written = 0;
     ctx->paused         = 0;
@@ -357,7 +378,7 @@ int audio_open(AudioContext *ctx, AVStream *stream,
         return -1;
     }
 
-    set_swr_layout(ctx->swr_ctx, ctx->codec_ctx);
+    set_swr_layout(ctx->swr_ctx, ctx->codec_ctx, ctx->channels);
     av_opt_set_int       (ctx->swr_ctx, "in_sample_rate",
                           ctx->sample_rate, 0);
     av_opt_set_sample_fmt(ctx->swr_ctx, "in_sample_fmt",
@@ -618,7 +639,7 @@ void audio_run(AudioContext *ctx)
                         ctx->sample_rate, ctx->alsa_rate);
 
                     swr_close(ctx->swr_ctx);
-                    set_swr_layout(ctx->swr_ctx, ctx->codec_ctx);
+                    set_swr_layout(ctx->swr_ctx, ctx->codec_ctx, ctx->channels);
                     av_opt_set_int(ctx->swr_ctx, "in_sample_rate",
                                    detected, 0);
                     av_opt_set_sample_fmt(ctx->swr_ctx, "in_sample_fmt",

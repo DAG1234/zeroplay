@@ -87,9 +87,28 @@ void queue_flush(Queue *q)
     pthread_mutex_lock(&q->mutex);
     q->head  = 0;
     q->tail  = 0;
-    q->count = 0;
+    q->count = 0; // this apparently makes the program forget it heap-allocated elements, causing/enabling memory leak
     pthread_cond_broadcast(&q->not_full);
     pthread_mutex_unlock(&q->mutex);
+}
+
+
+// New function I wrote to cleanly free memory before flushing queue
+// pointer to function is needed for handling vdec frames which are different
+
+void queue_flush_with_free(Queue *q, void (*free_fn)(void *))
+{
+	pthread_mutex_lock(&q->mutex);
+	while (q->count > 0) {
+		void *item = q->items[q->head];
+		q->head = (q->head + 1) % QUEUE_SIZE;
+		q->count--;
+		free_fn(item);
+	}
+	q->head = 0;
+	q->tail = 0;
+	pthread_cond_broadcast(&q->not_full);
+	pthread_mutex_unlock(&q->mutex);
 }
 
 void queue_destroy(Queue *q)
