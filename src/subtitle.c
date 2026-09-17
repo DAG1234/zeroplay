@@ -165,7 +165,8 @@ void subtitle_run(SubtitleContext *ctx)
 
         /* If queue is closed free all items */
         if (ctx->subtitle_queue->closed) {
-            while (!queue_pop(ctx->subtitle_queue, &item)) {
+            while (queue_pop(ctx->subtitle_queue, &item)) {
+                // when seeking past eof, this got stuck in an infinite loop. (with inverted cond)
                 AVPacket *pkt = (AVPacket *)item;
                 av_packet_free(&pkt);
             }
@@ -194,7 +195,7 @@ void subtitle_run(SubtitleContext *ctx)
                                   start_us, end_us);
             pthread_mutex_unlock(&ctx->cue_mutex);
         }
-
+        //fprintf(stderr, ".");
         av_packet_free(&pkt);
     }
 
