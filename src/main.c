@@ -268,7 +268,8 @@ static void term_raw(void)
 static int key_poll(void) {
     unsigned char c;
     ssize_t n = read(STDIN_FILENO, &c, 1);
-    if (n < 0) {  // this might be wrong according to Claude. -1 might not mean erro but no input? I think depends on blocking vs non-blocking
+    // Claude said this was wrong; -1 might not mean err but no input? But I think it depends on blocking/non-blocking
+    if (n < 0) {  
         fprintf(stderr, "ERROR: key_poll() Failed to read STDIN. (1st read)\n");
         return -1;
     }
@@ -287,7 +288,7 @@ static int key_poll(void) {
     unsigned char seq[8] = {0};
     if (pending > (int)(sizeof(seq) - 1)) { pending = sizeof(seq) - 1; }
     
-    n = read(STDIN_FILENO, seq, pending); // unsure if & needed for seq
+    n = read(STDIN_FILENO, seq, pending);
     if (n < 0) {
         fprintf(stderr, "ERROR: key_poll() Failed to read STDIN. (2nd read)\n");
         return -1;
@@ -365,13 +366,15 @@ typedef struct {
     Queue        video_queue;
     Queue        audio_queue;
     Queue        frame_queue;
-    pthread_t    dtid, datid, vtid, atid;  // threads: demux-thread, demux-audio-thread, video-decode-thread, audio-thread
+
+    // threads: demux-thread, demux-audio-thread, video-decode-thread, audio-thread
+    pthread_t    dtid, datid, vtid, atid;
     int          pipeline_open;
     int          audio_active;
 
     SubtitleContext  sub;
     Queue            sub_queue;
-    pthread_t        stid;                 // subtitle thread
+    pthread_t        stid;            // subtitle thread
     int              sub_active;
     int              sub_embedded;
     const char      *last_sub_text;
@@ -400,11 +403,20 @@ typedef struct {
 
 typedef struct { PlayerContext *p; } ThreadArg;
 
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_t       tid;
+    int             key;
+    volatile sig_atomic_t running;
+} InputContext;
+
+static InputContext g_input;
+
 // helper function to point queue_flush_with_free() to
 static void free_pkt_item(void *item)
 {
-	AVPacket *pkt = item;
-	av_packet_free(&pkt);
+    AVPacket *pkt = item;
+    av_packet_free(&pkt);
 }
 
 // need another helper function to properly drain vdec frame items
@@ -433,6 +445,21 @@ static void *subtitle_thread(void *arg)
 {
     PlayerContext *p = ((ThreadArg *)arg)->p; free(arg);
     subtitle_run(&p->sub); return NULL;
+}
+
+static void *input_thread(void *arg) 
+{
+    InputContext *ic = (InputContext *)arg;
+    while (ic->running) {
+        int k = key_poll();
+        if (k != 0) {
+            pthread_mutex_lock(&ic->mutex);
+            ic->key = k;
+            pthread_mutex_unlock(&ic->mutex);
+        }
+        sleep_us(50000);  // 20x per sec
+    }
+    return NULL;
 }
 
 /*
@@ -472,8 +499,12 @@ static DecodedFrame *skip_late_frames(PlayerContext *p)
 
 static void player_threads_start(PlayerContext *p)
 {
+    // Start threads in following order:
+    // demux, demux-audio, video-decode, audio, subtitle
+
     p->demux.loop_seamless = p->loop_seamless;
     ThreadArg *da = malloc(sizeof(*da)); da->p = p;
+
     pthread_create(&p->dtid, NULL, demux_thread, da);
     if (p->audio_active && p->separate_audio) {
         ThreadArg *daa = malloc(sizeof(*daa)); daa->p = p;
@@ -545,7 +576,7 @@ static void queue_drain_frames(PlayerContext *p)
 
 static void player_threads_stop(PlayerContext *p)
 {
-    // I added queue_flush() calls. This allowed pthread_join() (especially audio_queue) to no longer hang for several secs
+    // Added queue_flush() calls. This allowed audio pthread_join() not to hang for several secs
 
     queue_close(&p->video_queue);
     queue_flush_with_free(&p->video_queue, free_pkt_item);
@@ -574,11 +605,11 @@ static void player_threads_stop(PlayerContext *p)
     pthread_join(p->vtid, NULL);
     if (p->audio_active) { 
         audio_resume(&p->audio);  // not too sure why I have this tbh.
-        // line used to cause ~5.5s hang in quit+seek 256*21.3ms=5.4528s (defauly QUEUE_SIZE * AAC frame length)
+        // line used to cause ~5.5s hang in quit+seek 256*21.3ms=5.4528s (default QUEUE_SIZE * AAC frame length)
         pthread_join(p->atid, NULL);
     }
     if (p->sub_active && p->sub_embedded) {
-        pthread_join(p->stid, NULL);  // is this even still running?! did que_flush_with_free() earlier already deal with this?
+        pthread_join(p->stid, NULL);
     }
 }
 
@@ -1418,16 +1449,25 @@ int main(int argc, char *argv[])
         opened++;
     }
 
-    // change terminal state
-    term_raw();
+    term_raw();  // change terminal state
     // intercept control-C signal to handle all threads cleanly
     signal(SIGINT,  signal_handler);
     // signal(SIGTERM, signal_handler);
 
-    for (int i = 0; i < opened; i++)
-        if (!players[i].image_mode && players[i].pipeline_open)
-            player_threads_start(&players[i]);
+    // input thread should be started first
+    pthread_mutex_init(&g_input.mutex, NULL);
+    g_input.key = 0;
+    g_input.running = 1;
+    pthread_create(&g_input.tid, NULL, input_thread, &g_input);
 
+    // start other threads
+    for (int i = 0; i < opened; i++) {
+        if (!players[i].image_mode && players[i].pipeline_open) {
+            player_threads_start(&players[i]);
+        }
+    }
+    
+    // alter priority of main thread
     {
         struct sched_param sp = { .sched_priority = 10 };
         pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
@@ -1439,9 +1479,13 @@ int main(int argc, char *argv[])
     while (!quit) {
         if (g_signal_quit) { quit = 1; break; }
 
-        int key = key_poll();  // TODO move to another thread to prevent unneccessary syscalls
+        // key_poll() was moved to another thread.
+        pthread_mutex_lock(&g_input.mutex);
+        int key = g_input.key;
+        g_input.key = 0;
+        pthread_mutex_unlock(&g_input.mutex);
 
-        // key handling
+        // key handling block
         if (key == -1 || key == 'q' || key == 'Q' || key == 27) {
             quit = 1; break;
         }
@@ -1545,10 +1589,10 @@ int main(int argc, char *argv[])
                 int64_t target = players[i].current_pts + delta;
                 if (target < 0) target = 0;
                 if (players[i].duration_us > 0 && target > players[i].duration_us) {
-                    backward = 1;  // should prevent seek from looking past eof
+                    // prevents seeking past eof - also means it won't trigger next playlist item
+                    backward = 1;
                     target = players[i].duration_us;
                 }
-                // fprintf(stderr, "DEBUG: current_pts: %ld us,  target: %ld us.\n", players[i].current_pts, target);
                 player_seek(&players[i], target, backward);
                 players[i].current_pts = target;
             }
@@ -1559,13 +1603,14 @@ int main(int argc, char *argv[])
                 }
             }
         }
+        key = 0;  // key used, so reset it
 
         if (paused) { sleep_us(50000); continue; }
 
         int64_t next_due = INT64_MAX;  // functions more as a flag I believe
         int     all_eos  = 1;
 
-        // should always be 1 player in my setup
+        // always 1 player in my setup
         for (int i = 0; i < opened; i++) {
             PlayerContext *p = &players[i];
             if (p->eos) continue;
@@ -1597,8 +1642,8 @@ int main(int argc, char *argv[])
                     next_due = 0;
                     continue;
                 }
-                // queue_closed
                 else if (rc < 0) {
+                    // queue_closed
                     if (p->prev_frame) {
                         vdec_requeue_frame(&p->vdec, p->prev_frame);
                         p->prev_frame = NULL;
@@ -1642,7 +1687,6 @@ int main(int argc, char *argv[])
 
             // update frame on screen if pts is reached
             if (due <= now) {
-                // time to present frame has been reached
                 drm_present(&drm, p->output_idx, frame);  // ~30% of CPU time (expected)
                 p->held_frame = NULL;  // held_frame has been used, so reset.
                 next_due = 0;  // added this to prevent else statement in sleep block firing.
@@ -1694,20 +1738,23 @@ int main(int argc, char *argv[])
             int64_t sl = next_due - now_us();
             if (sl > 0) { sleep_us(sl); }
             // else we just want to spin around for the next frame immediately.
+            // would fire if decoder is too slow I belive.
         } else {
-            // NEW: set next_due to 0 after drm_present(), so this block should never fire.
-            // OLD: next_due was untouched because frame was just presented this iteration. To look into this
-            // fprintf(stderr, ".");  // DEBUG print
+            // next_due is set to 0 after drm_present(), so this shouldn't fire.
             sleep_us(2000);
         }
     }
     
     for (int i = 0; i < opened; i++) {
         fprintf(stderr, "Shutting down player %d\n", i);
-        player_shutdown(&players[i]); // &players[i] is PlayerContext ptr
+        player_shutdown(&players[i]);  // &players[i] is PlayerContext ptr
     }
     drm_close(&drm);
     
+    g_input.running = 0;
+    pthread_join(g_input.tid, NULL);
+    pthread_mutex_destroy(&g_input.mutex);
+
     fprintf(stderr, "have a nice day ;)\n");
     return 0;
 }
