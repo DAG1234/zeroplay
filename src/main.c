@@ -255,20 +255,20 @@ static void term_restore(void)
 
 static void term_raw(void)
 {
-    tcgetattr(STDIN_FILENO, &orig_termios);
-    atexit(term_restore);
-    struct termios raw = orig_termios;
-    raw.c_lflag &= (unsigned int)~(ECHO | ICANON);
-    raw.c_cc[VMIN]  = 0;
-    raw.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
-    write(STDOUT_FILENO, "\033[?25l", 6);
+    tcgetattr(STDIN_FILENO, &orig_termios);        // save terminal settings
+    atexit(term_restore);                          // register terminal fn to restore terminal at exit
+    struct termios raw = orig_termios;             // copy current settings as starting point
+    raw.c_lflag &= (unsigned int)~(ECHO | ICANON); // disable character printing + enable input per keypress w/o enter
+    raw.c_cc[VMIN]  = 0;                           // no min bytes on stdin buffer before read() (non-blocking)
+    raw.c_cc[VTIME] = 0;                           // no timeout for read()
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);      // apply new settings, discard any unread input
+    write(STDOUT_FILENO, "\033[?25l", 6);          // hide terminal cursor
 }
 
-static int key_poll(void){
+static int key_poll(void) {
     unsigned char c;
     ssize_t n = read(STDIN_FILENO, &c, 1);
-    if (n < 0) {  // this might be wrong according to Claude. -1 might not mean erro but no input?
+    if (n < 0) {  // this might be wrong according to Claude. -1 might not mean erro but no input? I think depends on blocking vs non-blocking
         fprintf(stderr, "ERROR: key_poll() Failed to read STDIN. (1st read)\n");
         return -1;
     }
@@ -301,7 +301,6 @@ static int key_poll(void){
         case 'C': return KEY_RIGHT;
         case 'D': return KEY_LEFT;
     }
-    
     return 0;  // others for e.g. funciton keys
 }
 
@@ -547,47 +546,40 @@ static void queue_drain_frames(PlayerContext *p)
 static void player_threads_stop(PlayerContext *p)
 {
     // I added queue_flush() calls. This allowed pthread_join() (especially audio_queue) to no longer hang for several secs
+
     queue_close(&p->video_queue);
     queue_flush_with_free(&p->video_queue, free_pkt_item);
-    fprintf(stderr, "DEBUG: MAIN: DONE queue_flush_with_free() for video_queue.\n");
 
     queue_close(&p->audio_queue);
-    fprintf(stderr, "DEBUG: MAIN: DONE queue_close() for audio_queue.\n");
-
     // SEGFAULT used to happen here when I used queue_flush_with_free()
+    // content of audio_queue was changed upstream from queue of av_packets to wrapper struct around av_packets I believe.
+    // however I'm pretty sure this workaround causes a memory leak
     queue_flush(&p->audio_queue);
-    fprintf(stderr, "DEBUG: MAIN: DONE queue_flush() for audio_queue.\n");
 
     queue_close(&p->frame_queue);
-    queue_flush(&p->frame_queue); // this one should apparently be different because it needs to return hardware resource mem
+    // this should probs be different bc it needs to return hardware resource mem
+    // likely memory leak here
+    queue_flush(&p->frame_queue);
+
     if (p->sub_active && p->sub_embedded) {
         queue_close(&p->sub_queue);
         queue_flush_with_free(&p->sub_queue, free_pkt_item);
     }
-    
-    fprintf(stderr, "DEBUG: MAIN: DONE all closes+flushes.  START joins.\n");
+
 
     pthread_join(p->dtid, NULL);
-    fprintf(stderr, "DEBUG: dtid joined.\n");
     if (p->audio_active && p->separate_audio) {
         pthread_join(p->datid, NULL);
-        fprintf(stderr, "DEBUG: datid joined.\n");
     }
     pthread_join(p->vtid, NULL);
-    fprintf(stderr, "DEBUG: vtid joined.\n");
     if (p->audio_active) { 
         audio_resume(&p->audio);  // not too sure why I have this tbh.
         // line used to cause ~5.5s hang in quit+seek 256*21.3ms=5.4528s (defauly QUEUE_SIZE * AAC frame length)
         pthread_join(p->atid, NULL);
-        fprintf(stderr, "DEBUG: atid joined.\n");
     }
-    fprintf(stderr, "DEBUG: sub_active: %d , sub_embedded: %d \n", p->sub_active, p->sub_embedded);
     if (p->sub_active && p->sub_embedded) {
-        fprintf(stderr, "DEBUG: subtitle join block executes.\n");
         pthread_join(p->stid, NULL);  // is this even still running?! did que_flush_with_free() earlier already deal with this?
-        fprintf(stderr, "DEBUG: stid joined.\n");
     }
-    fprintf(stderr, "DEBUG: MAIN: DONE player_threads_stop().\n");
 }
 
 static void player_queues_reinit(PlayerContext *p)
@@ -763,9 +755,7 @@ static void player_seek(PlayerContext *p, int64_t target_us, unsigned int backwa
     if (p->held_frame) { vdec_requeue_frame(&p->vdec, p->held_frame); p->held_frame = NULL; }
     if (p->prev_frame) { vdec_requeue_frame(&p->vdec, p->prev_frame); p->prev_frame = NULL; }
     
-    fprintf(stderr, "DEBUG: MAIN: START player_threads_stop().\n");
     player_threads_stop(p);
-    fprintf(stderr, "DEBUG: MAIN: DONE player_threads_stop().\n");
     demux_seek(&p->demux, target_us, backward);
     if (p->audio_active && p->separate_audio)
         demux_seek(&p->demux_audio, target_us, backward);
@@ -1373,7 +1363,11 @@ int main(int argc, char *argv[])
     if (parse_args(argc, argv, &opt) < 0)
         return 1;
 
-    avformat_network_init();
+    // ffmpeg fn to work around thread-safety issues in OpenSSL or GnuTLS
+    if(avformat_network_init() < 0) {
+        fprintf(stderr, "zeroplay: ERROR: avformat_network_init() failed.\n");
+        return -1;
+    }
 
 #ifdef HAVE_WEBSOCKET
     if (opt.ws_url && opt.ws_url[0]) {
@@ -1394,8 +1388,10 @@ int main(int argc, char *argv[])
     }
 
     DrmContext drm;
-    if (drm_open(&drm) < 0)
+    if (drm_open(&drm) < 0) {
+        fprintf(stderr, "zeroplay: ERROR: drm_open() failed.\n");
         return 1;
+    }
 
     int player_count = opt.path_count;
     if (player_count > drm.output_count) {
@@ -1422,9 +1418,11 @@ int main(int argc, char *argv[])
         opened++;
     }
 
+    // change terminal state
     term_raw();
+    // intercept control-C signal to handle all threads cleanly
     signal(SIGINT,  signal_handler);
-    signal(SIGTERM, signal_handler);
+    // signal(SIGTERM, signal_handler);
 
     for (int i = 0; i < opened; i++)
         if (!players[i].image_mode && players[i].pipeline_open)
@@ -1547,6 +1545,7 @@ int main(int argc, char *argv[])
                 int64_t target = players[i].current_pts + delta;
                 if (target < 0) target = 0;
                 if (players[i].duration_us > 0 && target > players[i].duration_us) {
+                    backward = 1;  // should prevent seek from looking past eof
                     target = players[i].duration_us;
                 }
                 // fprintf(stderr, "DEBUG: current_pts: %ld us,  target: %ld us.\n", players[i].current_pts, target);

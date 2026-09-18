@@ -142,13 +142,22 @@ static int alsa_setup_device(AudioContext *ctx, const char *dev_name,
                 dev_name, snd_strerror(err));
         return -1;
     }
-
+    
+    // allocate hw_params on the stack
     snd_pcm_hw_params_t *hw_params;
-    snd_pcm_hw_params_alloca(&hw_params);
-    snd_pcm_hw_params_any(ctx->pcm, hw_params);
+    snd_pcm_hw_params_alloca(&hw_params);  // macro not fn
 
-    snd_pcm_hw_params_set_access(ctx->pcm, hw_params,
-                                 SND_PCM_ACCESS_RW_INTERLEAVED);
+    // loads the device's full conciguration space into hw_params
+    err = snd_pcm_hw_params_any(ctx->pcm, hw_params);
+    if (err < 0) {
+        fprintf(stderr, "audio: ERROR: failed to load config space into hw_params.\n");
+        snd_pcm_close(ctx->pcm);
+        ctx->pcm = NULL;
+        return -1;
+    }
+
+    snd_pcm_hw_params_set_access(ctx->pcm, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED);
+
     err = snd_pcm_hw_params_set_format(ctx->pcm, hw_params, fmt);
     if (err < 0) {
         fprintf(stderr, "audio: device '%s' rejected format %s: %s\n",
@@ -169,10 +178,6 @@ static int alsa_setup_device(AudioContext *ctx, const char *dev_name,
     }
 
     ctx->channels = (int)actual_ch;
-    
-    // OLD: I think the 6CH bug is here, why ctx-> channels?
-    snd_pcm_hw_params_set_channels(ctx->pcm, hw_params,
-                                   (unsigned int)ctx->channels);
 
     unsigned int rate = (unsigned int)ctx->alsa_rate;
     snd_pcm_hw_params_set_rate_near(ctx->pcm, hw_params, &rate, 0);

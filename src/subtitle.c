@@ -158,8 +158,6 @@ int subtitle_open_file(SubtitleContext *ctx, const char *path, int64_t base_us)
 
 void subtitle_run(SubtitleContext *ctx)
 {
-    fprintf(stderr, "subtitle: decode thread started\n");
-
     while (1) {
         void *item = NULL;
 
@@ -195,7 +193,6 @@ void subtitle_run(SubtitleContext *ctx)
                                   start_us, end_us);
             pthread_mutex_unlock(&ctx->cue_mutex);
         }
-        //fprintf(stderr, ".");
         av_packet_free(&pkt);
     }
 
